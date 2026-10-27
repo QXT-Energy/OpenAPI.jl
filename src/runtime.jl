@@ -672,6 +672,15 @@ function _direct_union_match(::Type{T}, value) where {T}
     return value isa T
 end
 
+# `datetime = :as_written` fields are typed Union{DateTime,ZonedDateTime}. The
+# TimeZones extension marks the zoned member and implements the decoder; trial
+# decoding would turn an offset into UTC.
+_as_written_zoned(::Type) = false
+_as_written_pair(variants) =
+    Dates.DateTime in variants && any(_as_written_zoned, variants)
+_decode_as_written(value) =
+    throw(DecodeError("cannot decode $(typeof(value)) as an RFC 3339 date-time"))
+
 function _decode_union(
     ::Type{T},
     value;
@@ -682,6 +691,7 @@ function _decode_union(
     if value === nothing && Nothing in variants
         return nothing
     end
+    _as_written_pair(variants) && return _decode_as_written(value)
     # `Union{Absent, Nothing, X}` is how every optional field is typed. With one variant to
     # try, the ordering and collection below reduce to decoding it, so skip them.
     candidate = nothing
@@ -770,6 +780,20 @@ function _encode(value::NamedTuple)
     return output
 end
 _encode(value) = value
+
+# Used by `datetime = :as_written` modules: a DateTime stays zoneless.
+_encode_as_written(value::Dates.DateTime) =
+    Dates.format(value, dateformat"yyyy-mm-ddTHH:MM:SS.sss")
+_encode_as_written(value::AbstractVector{UInt8}) = _encode(value)
+_encode_as_written(value::AbstractVector) = Any[_encode_as_written(item) for item in value]
+function _encode_as_written(value::AbstractDict)
+    output = JSON.Object{String,Any}()
+    for (key, item) in value
+        output[String(key)] = _encode_as_written(item)
+    end
+    return output
+end
+_encode_as_written(value) = _encode(value)
 
 function _safe_header(name, value)
     header = String(name)

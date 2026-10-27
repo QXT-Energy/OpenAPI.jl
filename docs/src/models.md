@@ -21,7 +21,10 @@ Implemented model behavior includes:
 - `format: date-time` maps to `Dates.DateTime` by default, decoding RFC 3339
   offsets by normalizing to UTC; generate with `datetime = :zoned` to map to
   `TimeZones.ZonedDateTime` instead, preserving offsets end to end (the
-  generated module then depends on TimeZones.jl);
+  generated module then depends on TimeZones.jl), or with
+  `datetime = :as_written` to map to `Union{Dates.DateTime,TimeZones.ZonedDateTime}`,
+  keeping a timestamp without an offset as a wall clock and one with an offset as
+  written;
 - deterministic names with protection against Julia keywords, Base/Core names,
   and generated runtime names.
 

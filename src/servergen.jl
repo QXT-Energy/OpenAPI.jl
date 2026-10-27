@@ -12,7 +12,7 @@ import OpenAPI.Runtime:
     UnsupportedMediaType, Upload, _DeepObjectLeaf,
     _base_media_type, _decode, _decode_schema_header, _decode_sequential_json,
     _deep_object_assign!, _deep_object_coerce, _deep_object_path,
-    _encode, _encode_sequential_json, _form_fields, _header_atom, _header_scalar,
+    _encode, _encode_as_written, _encode_sequential_json, _form_fields, _header_atom, _header_scalar,
     _header_type_variant, _header_values, _is_json_media, _is_sequential_json_media,
     _media_type, _object, _parse_json, _required, _safe_header, _schema_valid,
     _select_media, _select_response, _validate_schema
@@ -922,7 +922,7 @@ function server_module_source(
     println(io, "# or a framework response for custom, unvalidated output.")
     println(io, "module ", plan.module_name, "\n")
     println(io, imports)
-    plan.datetime === :zoned && println(io, "using TimeZones")
+    _uses_timezones(plan.datetime) && println(io, "using TimeZones")
     _emit_contract_guard(io)
     print(io, GENERATED_SERVER_IMPORTS, '\n')
     _emit_security(io, plan)
@@ -937,7 +937,10 @@ function server_module_source(
     end
     isempty(abstract_targets) || println(io)
     for (index, model) in enumerate(plan.models)
-        _emit_model(io, model, index, indices, abstract_targets, wrapped_aliases)
+        _emit_model(
+            io, model, index, indices, abstract_targets, wrapped_aliases;
+            encode = _datetime_encoder(plan.datetime),
+        )
     end
     _emit_server_operations(io, plan)
     print(io, glue, '\n')

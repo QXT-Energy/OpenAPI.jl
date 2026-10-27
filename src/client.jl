@@ -9,7 +9,7 @@ import OpenAPI.Runtime:
     BasicCredential, BearerCredential, DecodeError, HttpCredential,
     MultipartPartHeaders, MutualTLSCredential, SchemaValidationError,
     UnexpectedBody, UnexpectedContentType, UnsupportedMediaType, Upload,
-    _decode, _encode, _form_fields, _object, _required, _request,
+    _decode, _encode, _encode_as_written, _form_fields, _object, _required, _request,
     _schema_valid, _validate_schema
 """
 
@@ -300,7 +300,8 @@ function _emit_model(
     index,
     indices,
     abstract_targets,
-    wrapped_aliases,
+    wrapped_aliases;
+    encode::String = "_encode",
 )
     doc = _model_docstring(model)
     doc === nothing || println(io, "@doc ", repr(doc))
@@ -334,7 +335,7 @@ function _emit_model(
         println(io, "    return ", model.name, "(_decode(", type, ", value, _openapi_validate))")
         println(io, "end")
         println(io, "function _encode(value::", model.name, ")")
-        println(io, "    output = _encode(value.value)")
+        println(io, "    output = ", encode, "(value.value)")
         println(io, "    return _validate_schema(_SPEC, ", schema, ", output, ", repr("encoding " * model.name), "; direction = ", direction, ")")
         println(io, "end\n")
         return
@@ -372,7 +373,7 @@ function _emit_model(
         println(io, "    return ", model.name, "(_decode(", model.alias, ", value, _openapi_validate))")
         println(io, "end")
         println(io, "function _encode(value::", model.name, ")")
-        println(io, "    output = _encode(value.value)")
+        println(io, "    output = ", encode, "(value.value)")
         println(io, "    return _validate_schema(_SPEC, ", schema, ", output, ", repr("encoding " * model.name), "; direction = ", direction, ")")
         println(io, "end")
         println(io, "Base.string(value::", model.name, ") = string(value.value)\n")
@@ -467,7 +468,7 @@ function _emit_model(
             println(io, "end")
         end
         println(io, "function _encode(value::", model.name, ")")
-        println(io, "    output = _encode(value.value)")
+        println(io, "    output = ", encode, "(value.value)")
         println(io, "    return _validate_schema(_SPEC, ", schema, ", output, ", repr("encoding " * model.name), "; direction = ", direction, ")")
         println(io, "end\n")
         return
@@ -580,12 +581,12 @@ function _emit_model(
     println(io, "function _encode(_openapi_value::", model.name, ")")
     println(io, "    _openapi_output = JSON.Object{String,Any}()")
     for field in model.fields
-        println(io, "    _openapi_value.", field.name, " isa Absent || (_openapi_output[", repr(field.wire_name), "] = _encode(_openapi_value.", field.name, "))")
+        println(io, "    _openapi_value.", field.name, " isa Absent || (_openapi_output[", repr(field.wire_name), "] = ", encode, "(_openapi_value.", field.name, "))")
     end
     if model.additional_type !== nothing
         println(io, "    for (_openapi_key, _openapi_item) in _openapi_value.additional_properties")
         println(io, "        haskey(_openapi_output, _openapi_key) && throw(ArgumentError(\"additional property conflicts with declared field: \" * _openapi_key))")
-        println(io, "        _openapi_output[_openapi_key] = _encode(_openapi_item)")
+        println(io, "        _openapi_output[_openapi_key] = ", encode, "(_openapi_item)")
         println(io, "    end")
     end
     println(io, "    return _validate_schema(_SPEC, ", schema, ", _openapi_output, ", repr("encoding " * model.name), "; direction = ", direction, ")")
@@ -1297,7 +1298,7 @@ function _generate(plan::ClientPlan)
     )
     println(io, "module ", plan.module_name, "\n")
     println(io, "using HTTP, JSON, OpenAPI, Base64, Dates, UUIDs")
-    plan.datetime === :zoned && println(io, "using TimeZones")
+    _uses_timezones(plan.datetime) && println(io, "using TimeZones")
     _emit_contract_guard(io)
     print(io, GENERATED_CLIENT_IMPORTS, '\n')
     _emit_security(io, plan)
@@ -1328,7 +1329,8 @@ function _generate(plan::ClientPlan)
             index,
             indices,
             abstract_targets,
-            wrapped_aliases,
+            wrapped_aliases;
+            encode = _datetime_encoder(plan.datetime),
         )
     end
     for operation in plan.operations
@@ -1350,7 +1352,10 @@ styles, content negotiation, and security requirements.
 `datetime = :utc` (the default) maps `format: date-time` to `Dates.DateTime`
 and normalizes RFC 3339 offsets to UTC while decoding; `datetime = :zoned`
 maps to `TimeZones.ZonedDateTime` and preserves offsets, making the generated
-module depend on TimeZones.jl.
+module depend on TimeZones.jl; `datetime = :as_written` maps to
+`Union{Dates.DateTime,TimeZones.ZonedDateTime}`, keeping a zone-less timestamp
+as a `Dates.DateTime` and an offset timestamp as a `ZonedDateTime`, and also
+depends on TimeZones.jl.
 """
 function client(
     source;

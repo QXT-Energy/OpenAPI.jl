@@ -141,6 +141,15 @@ offsets by normalizing to UTC. Generate with `datetime = :zoned` to map to
 `TimeZones.ZonedDateTime` instead, preserving offsets end to end; the
 generated module then depends on TimeZones.jl.
 
+Generate with `datetime = :as_written` when a timestamp without an offset is a
+wall clock rather than UTC. Fields map to
+`Union{Dates.DateTime,TimeZones.ZonedDateTime}`: a timestamp without an offset
+decodes to a `Dates.DateTime` and encodes without one, and a timestamp with `Z`
+or a `±HH:MM` offset decodes to a `ZonedDateTime` with that offset and encodes
+with it. Model fields round-trip in the form they were written. Date-times sent
+directly as parameters or request bodies still encode as with `:utc`. The
+generated module depends on TimeZones.jl.
+
 ## Source privacy
 
 Generated schema graphs use content-derived resource identifiers. Local paths,

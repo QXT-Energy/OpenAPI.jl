@@ -297,6 +297,133 @@
         @test occursin("at::Dates.DateTime", default_source)
     end
 
+    @testset "datetime = :as_written keeps zoneless and offset spellings" begin
+        stamp = OpenAPI.obj("type" => "string", "format" => "date-time")
+        written_document = OpenAPI.obj(
+            "openapi" => "3.2.0",
+            "info" => OpenAPI.obj("title" => "Written", "version" => "1"),
+            "paths" => OpenAPI.obj(
+                "/event" => OpenAPI.obj(
+                    "get" => OpenAPI.obj(
+                        "operationId" => "getEvent",
+                        "responses" => OpenAPI.obj(
+                            "200" => OpenAPI.obj(
+                                "description" => "event",
+                                "content" => OpenAPI.obj(
+                                    "application/json" => OpenAPI.obj(
+                                        "schema" => OpenAPI.obj(
+                                            "\$ref" => "#/components/schemas/Event",
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            "components" => OpenAPI.obj(
+                "schemas" => OpenAPI.obj(
+                    "Event" => OpenAPI.obj(
+                        "type" => "object",
+                        "required" => ["at"],
+                        "properties" => OpenAPI.obj(
+                            "at" => stamp,
+                            "opt" => stamp,
+                            "many" => OpenAPI.obj("type" => "array", "items" => stamp),
+                            "maybe" => OpenAPI.obj(
+                                "type" => ["string", "null"],
+                                "format" => "date-time",
+                            ),
+                        ),
+                        "additionalProperties" => false,
+                    ),
+                ),
+            ),
+        )
+        source = OpenAPI.client(
+            written_document;
+            name = "WrittenUnitClient",
+            datetime = :as_written,
+        )
+        @test occursin("using TimeZones", source)
+        @test occursin("at::Union{Dates.DateTime,TimeZones.ZonedDateTime}", source)
+        host = Module(:WrittenUnitClientHost)
+        Base.include_string(host, source, "WrittenUnitClient.jl")
+        Cw = Base.invokelatest(getfield, host, :WrittenUnitClient)
+        written(function_name, args...; kwargs...) =
+            Base.invokelatest(getfield(Cw, function_name), args...; kwargs...)
+        Written = Union{Dates.DateTime,TimeZones.ZonedDateTime}
+        WrittenDecodeError = Base.invokelatest(getfield, Cw, :DecodeError)
+        decode(text) = written(:_decode, Written, text)
+        offset(value) = Dates.value(value.zone.offset)
+
+        @test decode("2024-01-01T00:00:00") === Dates.DateTime(2024, 1, 1)
+        @test decode("2024-01-01T00:00:00.1239") === Dates.DateTime(2024, 1, 1, 0, 0, 0, 123)
+        utc = decode("2024-01-01T00:00:00Z")
+        @test utc isa TimeZones.ZonedDateTime
+        @test Dates.DateTime(utc) == Dates.DateTime(2024, 1, 1)
+        @test offset(utc) == 0
+        plus = decode("2024-01-01T02:00:00.5+02:00")
+        @test plus isa TimeZones.ZonedDateTime
+        @test Dates.DateTime(plus) == Dates.DateTime(2024, 1, 1, 2, 0, 0, 500)
+        @test offset(plus) == 2 * 3600
+        minus = decode("2024-01-01T00:00:00-07:00")
+        @test Dates.DateTime(minus) == Dates.DateTime(2024, 1, 1)
+        @test offset(minus) == -7 * 3600
+        for bad in ("2024-01-01", "garbage", "2024-01-01T00:00:00+02", "2024-13-01T00:00:00")
+            @test_throws WrittenDecodeError decode(bad)
+        end
+        @test_throws WrittenDecodeError decode(5)
+
+        @test written(:_encode_as_written, Dates.DateTime(2024, 1, 1)) ==
+              "2024-01-01T00:00:00.000"
+        @test written(:_encode_as_written, plus) == "2024-01-01T02:00:00.500+02:00"
+        @test written(:_encode_as_written, minus) == "2024-01-01T00:00:00.000-07:00"
+        for text in (
+            "2024-01-01T00:00:00.000",
+            "2024-01-01T02:00:00.500+02:00",
+            "2024-01-01T00:00:00.000-07:00",
+        )
+            @test written(:_encode_as_written, decode(text)) == text
+        end
+        @test decode(written(:_encode_as_written, utc)) == utc
+
+        Event = Base.invokelatest(getfield, Cw, :EventModel)
+        event = written(
+            :_decode,
+            Event,
+            JSON.parse("""{"at":"2024-01-01T00:00:00","opt":"2024-01-01T02:00:00+02:00","many":["2024-01-01T00:00:00","2024-01-01T00:00:00Z"]}"""),
+        )
+        @test event.at === Dates.DateTime(2024, 1, 1)
+        @test event.opt isa TimeZones.ZonedDateTime
+        @test event.many[1] isa Dates.DateTime
+        @test event.many[2] isa TimeZones.ZonedDateTime
+        encoded = written(:_encode, event)
+        @test encoded["at"] == "2024-01-01T00:00:00.000"
+        @test encoded["opt"] == "2024-01-01T02:00:00.000+02:00"
+        @test encoded["many"][1] == "2024-01-01T00:00:00.000"
+        @test written(:_decode, Event, encoded).at === event.at
+        nulled = written(:_decode, Event, JSON.parse("""{"at":"2024-01-01T00:00:00","maybe":null}"""))
+        @test nulled.maybe === nothing
+        @test written(:_encode, nulled)["maybe"] === nothing
+        maybe = written(:_decode, Event, JSON.parse("""{"at":"2024-01-01T00:00:00","maybe":"2024-01-01T00:00:00-07:00"}"""))
+        @test offset(maybe.maybe) == -7 * 3600
+
+        # :utc and :zoned output is unchanged
+        utc_source = OpenAPI.client(written_document; name = "WrittenUnitClient")
+        @test !occursin("TimeZones", utc_source)
+        @test !occursin("_encode_as_written(", utc_source)
+        @test occursin("at::Dates.DateTime", utc_source)
+        zoned_source = OpenAPI.client(
+            written_document;
+            name = "WrittenUnitClient",
+            datetime = :zoned,
+        )
+        @test occursin("at::TimeZones.ZonedDateTime", zoned_source)
+        @test !occursin("_encode_as_written(", zoned_source)
+        @test Dates.DateTime(2024, 1, 1) |> OpenAPI.Runtime._encode == "2024-01-01T00:00:00.000Z"
+    end
+
     @testset "query, header, and cookie styles" begin
         @test invoke(:_query_parameter, "q", ["a", "b"], :form, false, false) ==
               [("q", "a,b", true)]

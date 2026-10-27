@@ -540,14 +540,25 @@ function PlanningContext(
 end
 
 function _validate_datetime_option(datetime::Symbol)
-    datetime in (:utc, :zoned) || throw(
+    datetime in (:utc, :zoned, :as_written) || throw(
         ArgumentError(
-            "datetime must be :utc (Dates.DateTime, offsets normalized to UTC) " *
-            "or :zoned (TimeZones.ZonedDateTime, offsets preserved), got $(repr(datetime))",
+            "datetime must be :utc (Dates.DateTime, offsets normalized to UTC), " *
+            "or :zoned (TimeZones.ZonedDateTime, offsets preserved), " *
+            "or :as_written (Dates.DateTime without offset, ZonedDateTime with one), " *
+            "got $(repr(datetime))",
         ),
     )
     return datetime
 end
+
+_uses_timezones(datetime::Symbol) = datetime in (:zoned, :as_written)
+_datetime_encoder(datetime::Symbol) = _datetime_encoder(Val(datetime))
+_datetime_encoder(::Val) = "_encode"
+_datetime_encoder(::Val{:as_written}) = "_encode_as_written"
+_datetime_type(::Val) = "Dates.DateTime"
+_datetime_type(::Val{:zoned}) = "TimeZones.ZonedDateTime"
+_datetime_type(::Val{:as_written}) =
+    "Union{Dates.DateTime,TimeZones.ZonedDateTime}"
 
 function _model_name!(context::PlanningContext, view::SchemaView, suggested, mode)
     direction = _direction(context, view, mode)
@@ -679,8 +690,7 @@ function _primitive_type!(
             return "Dates.Date"
         elseif format == "date-time"
             context.uses_dates = true
-            return context.datetime === :zoned ? "TimeZones.ZonedDateTime" :
-                   "Dates.DateTime"
+            return _datetime_type(Val(context.datetime))
         elseif format == "time"
             context.uses_dates = true
             return "Dates.Time"
