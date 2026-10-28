@@ -549,6 +549,18 @@ function _validate_datetime_option(datetime::Symbol)
     return datetime
 end
 
+# `date-time-local` (OpenAPI Format Registry) has no offset. Under `:zoned`, where
+# `date-time` is a `ZonedDateTime`, a `Dates.DateTime` can only mean that wall clock.
+# Under `:utc`, `Dates.DateTime` already means a UTC instant, so the field stays a string.
+_local_datetime_type!(::PlanningContext, ::Val) = "String"
+function _local_datetime_type!(context::PlanningContext, ::Val{:zoned})
+    context.uses_dates = true
+    return "Dates.DateTime"
+end
+_datetime_encoder(datetime::Symbol) = _datetime_encoder(Val(datetime))
+_datetime_encoder(::Val) = "_encode"
+_datetime_encoder(::Val{:zoned}) = "_encode_zoned"
+
 function _model_name!(context::PlanningContext, view::SchemaView, suggested, mode)
     direction = _direction(context, view, mode)
     resolved = _resolved_view(view)
@@ -681,6 +693,8 @@ function _primitive_type!(
             context.uses_dates = true
             return context.datetime === :zoned ? "TimeZones.ZonedDateTime" :
                    "Dates.DateTime"
+        elseif format == "date-time-local"
+            return _local_datetime_type!(context, Val(context.datetime))
         elseif format == "time"
             context.uses_dates = true
             return "Dates.Time"

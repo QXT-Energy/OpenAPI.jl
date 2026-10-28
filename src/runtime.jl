@@ -20,7 +20,7 @@ keywords, operation tables, schema descriptors, dialect literals), and their
 semantics. Bump this whenever generated code needs a new contract so older
 runtimes reject it at load time; see [`require_contract`](@ref).
 """
-const CONTRACT_VERSION = 4
+const CONTRACT_VERSION = 5
 
 # Oldest supported contract; raise only when runtime changes break names,
 # data shapes, or semantics older generated modules depend on.
@@ -770,6 +770,20 @@ function _encode(value::NamedTuple)
     return output
 end
 _encode(value) = value
+
+# `datetime = :zoned` modules encode through this. There a `Dates.DateTime` is a
+# `date-time-local` wall clock, so it is written with no offset.
+_encode_zoned(value::Dates.DateTime) = Dates.format(value, dateformat"yyyy-mm-ddTHH:MM:SS.sss")
+_encode_zoned(value::AbstractVector{UInt8}) = _encode(value)
+_encode_zoned(value::Union{AbstractVector,Tuple}) = Any[_encode_zoned(item) for item in value]
+function _encode_zoned(value::Union{AbstractDict,NamedTuple})
+    output = JSON.Object{String,Any}()
+    for (key, item) in pairs(value)
+        output[String(key)] = _encode_zoned(item)
+    end
+    return output
+end
+_encode_zoned(value) = _encode(value)
 
 function _safe_header(name, value)
     header = String(name)

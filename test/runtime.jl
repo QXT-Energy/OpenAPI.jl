@@ -271,12 +271,11 @@
             Dates.DateTime(2026, 8, 7, 15),
             TimeZones.tz"UTC",
         )
-        @test zoned_invoke(:_decode, TimeZones.ZonedDateTime, "2026-08-07T15:00:00") ==
-              TimeZones.ZonedDateTime(
-            Dates.DateTime(2026, 8, 7, 15),
-            TimeZones.tz"UTC",
-        )
         ZonedDecodeError = Base.invokelatest(getfield, Cz, :DecodeError)
+        # RFC 3339 `date-time` needs `Z` or an offset; a wall clock is not read as UTC.
+        for bad in ("2026-08-07T15:00:00", "2026-08-07T15:00:00Z\n")
+            @test_throws ZonedDecodeError zoned_invoke(:_decode, TimeZones.ZonedDateTime, bad)
+        end
         @test_throws ZonedDecodeError zoned_invoke(
             :_decode,
             TimeZones.ZonedDateTime,
@@ -295,6 +294,92 @@
         default_source = OpenAPI.client(zoned_document; name = "ZonedUnitClient")
         @test !occursin("ZonedDateTime", default_source)
         @test occursin("at::Dates.DateTime", default_source)
+    end
+
+    @testset "date-time-local is a wall clock under datetime = :zoned" begin
+        clock = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?"
+        offset_form = OpenAPI.obj(
+            "type" => "string",
+            "format" => "date-time",
+            "pattern" => clock * "(Z|[+-]\\d{2}:\\d{2})\$",
+        )
+        local_form = OpenAPI.obj(
+            "type" => "string",
+            "format" => "date-time-local",
+            "pattern" => clock * "\$",
+        )
+        local_document = OpenAPI.obj(
+            "openapi" => "3.2.0",
+            "info" => OpenAPI.obj("title" => "Local", "version" => "1"),
+            "paths" => OpenAPI.obj(
+                "/reading" => OpenAPI.obj(
+                    "get" => OpenAPI.obj(
+                        "operationId" => "getReading",
+                        "responses" => OpenAPI.obj(
+                            "200" => OpenAPI.obj(
+                                "description" => "reading",
+                                "content" => OpenAPI.obj(
+                                    "application/json" => OpenAPI.obj(
+                                        "schema" => OpenAPI.obj(
+                                            "\$ref" => "#/components/schemas/Reading",
+                                        ),
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            "components" => OpenAPI.obj(
+                "schemas" => OpenAPI.obj(
+                    "Reading" => OpenAPI.obj(
+                        "type" => "object",
+                        "required" => ["wall", "either"],
+                        "properties" => OpenAPI.obj(
+                            "wall" => local_form,
+                            "either" => OpenAPI.obj("anyOf" => [offset_form, local_form]),
+                            "walls" => OpenAPI.obj("type" => "array", "items" => local_form),
+                        ),
+                        "additionalProperties" => false,
+                    ),
+                ),
+            ),
+        )
+
+        utc_source = OpenAPI.client(local_document; name = "LocalUnitClient")
+        @test occursin("wall::String", utc_source)
+        @test !occursin("_encode_zoned(", utc_source)
+
+        source = OpenAPI.client(local_document; name = "LocalUnitClient", datetime = :zoned)
+        @test occursin("wall::Dates.DateTime", source)
+        @test occursin("walls::Union{Absent,Nothing,Vector{Dates.DateTime}}", source)
+        host = Module(:LocalUnitClientHost)
+        Base.include_string(host, source, "LocalUnitClient.jl")
+        Cl = Base.invokelatest(getfield, host, :LocalUnitClient)
+        local_invoke(function_name, args...; kwargs...) =
+            Base.invokelatest(getfield(Cl, function_name), args...; kwargs...)
+        Reading = Base.invokelatest(getfield, Cl, :Reading)
+        LocalDecodeError = Base.invokelatest(getfield, Cl, :DecodeError)
+        read_back(text) = local_invoke(:_decode, Reading, JSON.parse(text))
+
+        reading = read_back(
+            """{"wall":"2026-08-07T15:00:00.250","either":"2026-08-07T15:00:00","walls":["2026-08-07T16:00:00"]}""",
+        )
+        @test reading.wall === Dates.DateTime(2026, 8, 7, 15, 0, 0, 250)
+        @test reading.either.value === Dates.DateTime(2026, 8, 7, 15)
+        @test reading.walls == [Dates.DateTime(2026, 8, 7, 16)]
+        encoded = local_invoke(:_encode, reading)
+        @test encoded["wall"] == "2026-08-07T15:00:00.250"
+        @test encoded["either"] == "2026-08-07T15:00:00.000"
+        @test encoded["walls"] == ["2026-08-07T16:00:00.000"]
+
+        zoned = read_back("""{"wall":"2026-08-07T15:00:00","either":"2026-08-07T15:00:00-04:00"}""")
+        @test zoned.either.value isa TimeZones.ZonedDateTime
+        @test Dates.value(zoned.either.value.zone.offset) == -4 * 3600
+        @test local_invoke(:_encode, zoned)["either"] == "2026-08-07T15:00:00.000-04:00"
+
+        # The schema decides the form: an offset on a wall-clock field is rejected.
+        @test_throws Exception read_back("""{"wall":"2026-08-07T15:00:00Z","either":"2026-08-07T15:00:00"}""")
     end
 
     @testset "query, header, and cookie styles" begin
