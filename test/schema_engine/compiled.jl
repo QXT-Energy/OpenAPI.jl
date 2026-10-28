@@ -237,6 +237,24 @@ end
         Dict("pattern" => "[");
         dialect = SchemaEngine.DRAFT202012,
     )
+
+    # ECMA-262 `pattern` semantics, which PCRE's defaults do not follow. The official
+    # suite's optional/ecmascript-regex.json covers this fully (OPENAPI_SCHEMA_SUITE=all).
+    ecma(pattern) = SchemaEngine.CompiledSchema(
+        Dict("pattern" => pattern);
+        dialect = SchemaEngine.DRAFT202012,
+    )
+    @test !isvalid(ecma("^abc\$"), "abc\n")
+    @test isvalid(ecma("^\\d\$"), "7")
+    @test !isvalid(ecma("^\\d\$"), "\u07c0")
+    @test !isvalid(ecma("^\\w\$"), "é")
+    @test isvalid(ecma("^\\s\$"), "\u00a0")
+    @test isvalid(ecma("^\\s\$"), "\ufeff")
+    @test isvalid(ecma("^\\s\$"), "\u2029")
+    @test !isvalid(ecma("^\\S\$"), "\u2029")
+    @test isvalid(ecma("^[\\s]\$"), "\u3000")
+    @test isvalid(ecma("^\\p{digit}+\$"), "\u07c0\u0663")
+    @test isvalid(ecma("^\\p{Letter}cole\$"), "école")
     @test_throws SchemaEngine.CompilationError SchemaEngine.CompiledSchema(
         Dict("contains" => Dict(), "minContains" => "invalid");
         dialect = SchemaEngine.DRAFT202012,

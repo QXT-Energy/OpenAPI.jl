@@ -225,8 +225,14 @@ end
 
 dialect(::Bool; default::Dialect = DRAFT7) = default
 
+# Long names and Unicode's extra aliases (`digit`, `cntrl`, `punct`, `Combining_Mark`) of
+# the General_Category values. PCRE knows only the short names.
 const ECMA_GENERAL_CATEGORIES = Dict(
     "Cased_Letter" => "L&",
+    "Combining_Mark" => "M",
+    "cntrl" => "Cc",
+    "digit" => "Nd",
+    "punct" => "P",
     "Close_Punctuation" => "Pe",
     "Connector_Punctuation" => "Pc",
     "Control" => "Cc",
@@ -282,12 +288,28 @@ function _ecma_property(property::AbstractString)
     return String(property)
 end
 
+# ECMA-262 `\s`: WhiteSpace (tab, vertical tab, form feed, every Zs, U+FEFF) and
+# LineTerminator (LF, CR, U+2028, U+2029). PCRE without UCP matches only the ASCII ones.
+# Julia compiles with ALT_BSUX, so code points use the JavaScript `\\uhhhh` form.
+const ECMA_WHITESPACE = "\\t\\n\\x0B\\f\\r\\p{Zs}\\u2028\\u2029\\uFEFF"
+
+function _ecma_whitespace(escaped::Char, in_class::Bool)
+    if in_class
+        # PCRE cannot subtract a set inside a class, so `[\S]` keeps its ASCII meaning.
+        return escaped == 's' ? ECMA_WHITESPACE : "\\S"
+    end
+    return escaped == 's' ? "[$ECMA_WHITESPACE]" : "[^$ECMA_WHITESPACE]"
+end
+
 function _ecma_pattern(pattern::AbstractString)
     io = IOBuffer()
+    in_class = false
     i = firstindex(pattern)
     stop = lastindex(pattern)
     while i <= stop
         if pattern[i] != '\\'
+            pattern[i] == '[' && (in_class = true)
+            pattern[i] == ']' && (in_class = false)
             write(io, pattern[i])
             i = nextind(pattern, i)
             continue
@@ -301,7 +323,15 @@ function _ecma_pattern(pattern::AbstractString)
             write(io, '\\')
         end
         isodd(slashes) || continue
-        i <= stop && pattern[i] in ('p', 'P') || continue
+        i <= stop || continue
+        if pattern[i] in ('s', 'S')
+            seek(io, position(io) - 1)
+            truncate(io, position(io))
+            write(io, _ecma_whitespace(pattern[i], in_class))
+            i = nextind(pattern, i)
+            continue
+        end
+        pattern[i] in ('p', 'P') || continue
         property_type = pattern[i]
         brace = nextind(pattern, i)
         brace <= stop && pattern[brace] == '{' || continue
@@ -320,4 +350,10 @@ function _ecma_pattern(pattern::AbstractString)
     return String(take!(io))
 end
 
-_ecma_regex(pattern::AbstractString) = Regex(_ecma_pattern(pattern))
+# ECMA-262 semantics on PCRE: `$` matches only at the very end, never before a trailing
+# newline (DOLLAR_ENDONLY), and `\d`, `\w`, `\b` are ASCII (no UCP). `\p{...}` still
+# matches Unicode properties, which needs only UTF mode.
+const ECMA_COMPILE_OPTIONS = (Base.DEFAULT_COMPILER_OPTS & ~Base.PCRE.UCP) | Base.PCRE.DOLLAR_ENDONLY
+
+_ecma_regex(pattern::AbstractString) =
+    Regex(_ecma_pattern(pattern), ECMA_COMPILE_OPTIONS, Base.DEFAULT_MATCH_OPTS)
