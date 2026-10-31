@@ -40,12 +40,24 @@ function _decode_zoned(::Type{Dict{String,T}}, value::AbstractDict, validate::Bo
     end
     return output
 end
+# Like the runtime's union decoding, a variant that the value already is goes first,
+# so `5` stays an `Int64` when `Float64` is also allowed.
+_zoned_rank(::Type{V}, ::V) where {V} = 0
+_zoned_rank(::Type, value) = 1
 function _decode_zoned(T::Union, value, validate::Bool)
     variants = Base.uniontypes(T)
     value === nothing && Nothing in variants && return nothing
-    candidates = filter(variant -> variant !== Absent && variant !== Nothing, variants)
-    length(candidates) == 1 || return _decode(T, value, validate)
-    return _decode_zoned(only(candidates), value, validate)
+    failures = String[]
+    for variant in sort!(variants; by = variant -> _zoned_rank(variant, value))
+        (variant === Absent || variant === Nothing) && continue
+        try
+            return _decode_zoned(variant, value, validate)
+        catch error
+            error isa DecodeError || rethrow()
+            push!(failures, error.message)
+        end
+    end
+    throw(DecodeError("value does not match any variant of $T: " * join(failures, "; ")))
 end
 _decode_zoned(::Type{T}, value, validate::Bool) where {T} = _decode(T, value, validate)
 

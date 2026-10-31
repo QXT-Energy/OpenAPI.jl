@@ -343,8 +343,16 @@
                             "wall" => local_form,
                             "either" => OpenAPI.obj("anyOf" => [offset_form, local_form]),
                             "walls" => OpenAPI.obj("type" => "array", "items" => local_form),
+                            "mixed" => OpenAPI.obj(
+                                "type" => ["string", "integer"],
+                                "format" => "date-time-local",
+                            ),
                         ),
                         "additionalProperties" => false,
+                    ),
+                    "WallMap" => OpenAPI.obj(
+                        "type" => "object",
+                        "additionalProperties" => local_form,
                     ),
                 ),
             ),
@@ -365,6 +373,7 @@
         local_invoke(function_name, args...; kwargs...) =
             Base.invokelatest(getfield(Cl, function_name), args...; kwargs...)
         Reading = Base.invokelatest(getfield, Cl, :Reading)
+        WallMap = Base.invokelatest(getfield, Cl, :WallMap)
         LocalDecodeError = Base.invokelatest(getfield, Cl, :DecodeError)
         read_back(text) = local_invoke(:_decode, Reading, JSON.parse(text))
 
@@ -391,7 +400,21 @@
             @test_throws LocalDecodeError read_back(
                 JSON.json(Dict("wall" => "2026-08-07T15:00:00", "either" => "2026-08-07T15:00:00", "walls" => [bad])),
             )
+            @test_throws LocalDecodeError read_back(
+                JSON.json(Dict("wall" => "2026-08-07T15:00:00", "either" => "2026-08-07T15:00:00", "mixed" => bad)),
+            )
+            @test_throws LocalDecodeError local_invoke(:_decode, WallMap, JSON.Object{String,Any}("a" => bad))
         end
+
+        # A union of types still decodes the wall clock strictly and keeps other variants.
+        mixed(value) = read_back(
+            JSON.json(Dict("wall" => "2026-08-07T15:00:00", "either" => "2026-08-07T15:00:00", "mixed" => value)),
+        ).mixed
+        @test mixed("2026-08-07T15:00:00") === Dates.DateTime(2026, 8, 7, 15)
+        @test mixed(5) === 5
+        walls = local_invoke(:_decode, WallMap, JSON.Object{String,Any}("a" => "2026-08-07T15:00:00"))
+        @test walls.additional_properties["a"] === Dates.DateTime(2026, 8, 7, 15)
+        @test local_invoke(:_encode, walls)["a"] == "2026-08-07T15:00:00.000"
 
         # Positions that encode through the shared runtime would write a wall clock as UTC.
         query = OpenAPI.obj("name" => "at", "in" => "query", "schema" => local_form)
