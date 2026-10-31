@@ -5,10 +5,9 @@ source of truth: generate the client and the server from one specification and
 implement one handler function per operation.
 
 !!! note "Generated-module compatibility"
-    This runtime supports generated-code contracts 3 through 5. Existing
+    This runtime supports generated-code contracts 3 through 4. Existing
     contract-3 servers keep their generated behavior; regenerate them to use
-    `OpenAPI.Reply`. Contract-4 modules require OpenAPI.jl 1.2 or later, and
-    contract-5 modules the release that introduced contract 5.
+    `OpenAPI.Reply`. Contract-4 modules require OpenAPI.jl 1.2 or later.
     See [the runtime contract](@ref "Generated modules and the runtime contract").
 
 ```julia

@@ -115,8 +115,8 @@
 
         current = OpenAPI.Runtime.CONTRACT_VERSION
         # Deliberate tripwire: update alongside every CONTRACT_VERSION bump.
-        @test current == 5
-        for supported in (3, 4, current)
+        @test current == 4
+        for supported in (3, current)
             @test OpenAPI.Runtime.require_contract(supported, OpenAPI.PACKAGE_VERSION) === nothing
         end
         for generated_contract in (1, 2, current + 1)

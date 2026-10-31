@@ -194,6 +194,7 @@
         @test_throws DecodeError decode("2026-08-07")
         @test_throws DecodeError decode("2026-08-07T15:00:00+02")
         @test_throws DecodeError decode("garbage")
+        @test_throws DecodeError decode("2026-08-07T15:00:00Z\n")
     end
 
     @testset "datetime = :zoned preserves time zone offsets" begin
@@ -271,10 +272,21 @@
             Dates.DateTime(2026, 8, 7, 15),
             TimeZones.tz"UTC",
         )
+        # The runtime stays lenient so modules generated before the module-local
+        # `_decode_zoned` keep their behavior.
+        @test zoned_invoke(:_decode, TimeZones.ZonedDateTime, "2026-08-07T15:00:00") ==
+              TimeZones.ZonedDateTime(
+            Dates.DateTime(2026, 8, 7, 15),
+            TimeZones.tz"UTC",
+        )
         ZonedDecodeError = Base.invokelatest(getfield, Cz, :DecodeError)
         # RFC 3339 `date-time` needs `Z` or an offset; a wall clock is not read as UTC.
         for bad in ("2026-08-07T15:00:00", "2026-08-07T15:00:00Z\n")
-            @test_throws ZonedDecodeError zoned_invoke(:_decode, TimeZones.ZonedDateTime, bad)
+            @test_throws ZonedDecodeError zoned_invoke(
+                :_decode,
+                Base.invokelatest(getfield, Cz, :EventModel),
+                JSON.Object{String,Any}("at" => bad),
+            )
         end
         @test_throws ZonedDecodeError zoned_invoke(
             :_decode,
@@ -297,17 +309,9 @@
     end
 
     @testset "date-time-local is a wall clock under datetime = :zoned" begin
-        clock = "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?"
-        offset_form = OpenAPI.obj(
-            "type" => "string",
-            "format" => "date-time",
-            "pattern" => clock * "(Z|[+-]\\d{2}:\\d{2})\$",
-        )
-        local_form = OpenAPI.obj(
-            "type" => "string",
-            "format" => "date-time-local",
-            "pattern" => clock * "\$",
-        )
+        # No `pattern`: the generated decoders alone tell the two forms apart.
+        offset_form = OpenAPI.obj("type" => "string", "format" => "date-time")
+        local_form = OpenAPI.obj("type" => "string", "format" => "date-time-local")
         local_document = OpenAPI.obj(
             "openapi" => "3.2.0",
             "info" => OpenAPI.obj("title" => "Local", "version" => "1"),
@@ -348,10 +352,12 @@
 
         utc_source = OpenAPI.client(local_document; name = "LocalUnitClient")
         @test occursin("wall::String", utc_source)
-        @test !occursin("_encode_zoned(", utc_source)
+        @test !occursin("_encode_zoned", utc_source)
+        @test occursin("require_contract(4,", utc_source)
 
         source = OpenAPI.client(local_document; name = "LocalUnitClient", datetime = :zoned)
         @test occursin("wall::Dates.DateTime", source)
+        @test occursin("require_contract(4,", source)
         @test occursin("walls::Union{Absent,Nothing,Vector{Dates.DateTime}}", source)
         host = Module(:LocalUnitClientHost)
         Base.include_string(host, source, "LocalUnitClient.jl")
@@ -378,8 +384,37 @@
         @test Dates.value(zoned.either.value.zone.offset) == -4 * 3600
         @test local_invoke(:_encode, zoned)["either"] == "2026-08-07T15:00:00.000-04:00"
 
-        # The schema decides the form: an offset on a wall-clock field is rejected.
-        @test_throws Exception read_back("""{"wall":"2026-08-07T15:00:00Z","either":"2026-08-07T15:00:00"}""")
+        for bad in ("2026-08-07T15:00:00Z", "2026-08-07T15:00:00-04:00", "2026-08-07T15:00:00\n")
+            @test_throws LocalDecodeError read_back(
+                JSON.json(Dict("wall" => bad, "either" => "2026-08-07T15:00:00")),
+            )
+            @test_throws LocalDecodeError read_back(
+                JSON.json(Dict("wall" => "2026-08-07T15:00:00", "either" => "2026-08-07T15:00:00", "walls" => [bad])),
+            )
+        end
+
+        # Positions that encode through the shared runtime would write a wall clock as UTC.
+        query = OpenAPI.obj("name" => "at", "in" => "query", "schema" => local_form)
+        positions = merge(
+            local_document,
+            OpenAPI.obj(
+                "paths" => OpenAPI.obj(
+                    "/reading" => OpenAPI.obj(
+                        "get" => OpenAPI.obj(
+                            "operationId" => "getReading",
+                            "parameters" => [query],
+                            "responses" => OpenAPI.obj("204" => OpenAPI.obj("description" => "none")),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        @test occursin("at::Union{Absent,String}", OpenAPI.client(positions; name = "LocalUnitClient"))
+        for generate in (OpenAPI.plan, OpenAPI.serverplan)
+            error = @test_throws OpenAPI.OpenAPIError generate(positions; datetime = :zoned)
+            codes = Set(diagnostic.code for diagnostic in error.value.diagnostics)
+            @test :unsupported_date_time_local_position in codes
+        end
     end
 
     @testset "query, header, and cookie styles" begin

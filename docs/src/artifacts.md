@@ -1,13 +1,11 @@
 # Generated modules and the runtime contract
 
-The current runtime supports **contracts 3 through 5** and generates
-**contract 5** modules. Existing contract-3 and contract-4 clients and servers
-remain compatible and keep their generated behavior. Regenerate a server to use
-`OpenAPI.Reply`, and a `datetime = :zoned` module to map `date-time-local`.
-Contract-5 modules require the OpenAPI.jl release that introduced contract 5;
-older runtimes reject contract 5 at load time. Packages that commit contract-5
-generated modules should raise their `OpenAPI` compatibility bound to that
-release.
+The current runtime supports **contracts 3 through 4** and generates
+**contract 4** modules. Existing contract-3 clients and servers remain compatible
+and keep their generated behavior. Regenerate a server to use `OpenAPI.Reply`.
+Contract-4 modules require OpenAPI.jl 1.2 or later; older runtimes still reject
+contract 4 at load time. Packages that commit contract-4 generated modules
+should set `OpenAPI = "1.2"` in their `Project.toml` compatibility bounds.
 
 A generated module targets an OpenAPI.jl generated-code contract version. It
 also records the exact OpenAPI.jl version that produced it. The module imports

@@ -5,16 +5,12 @@ module OpenAPITimeZonesExt
 using TimeZones, Dates
 import OpenAPI.Runtime: _decode, _encode, DecodeError
 
-# RFC 3339 `date-time` requires `Z` or an offset. A value without one is a
-# `date-time-local` wall clock, which names no instant, so it is not read as UTC.
 function _decode(::Type{TimeZones.ZonedDateTime}, value::AbstractString)
     matched = match(
-        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})\z",
+        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$",
         value,
     )
-    matched === nothing && throw(
-        DecodeError("invalid RFC 3339 date-time $(repr(value)) (`Z` or an offset is required)"),
-    )
+    matched === nothing && throw(DecodeError("invalid RFC 3339 date-time $(repr(value))"))
     try
         clock = Dates.DateTime(matched.captures[1])
         fraction = matched.captures[2]
@@ -24,7 +20,7 @@ function _decode(::Type{TimeZones.ZonedDateTime}, value::AbstractString)
             )
         end
         zone = matched.captures[3]
-        timezone = if zone == "Z"
+        timezone = if zone === nothing || zone == "Z"
             TimeZones.tz"UTC"
         else
             sign = startswith(zone, '+') ? 1 : -1

@@ -9,9 +9,62 @@ import OpenAPI.Runtime:
     BasicCredential, BearerCredential, DecodeError, HttpCredential,
     MultipartPartHeaders, MutualTLSCredential, SchemaValidationError,
     UnexpectedBody, UnexpectedContentType, UnsupportedMediaType, Upload,
-    _decode, _encode, _encode_zoned, _form_fields, _object, _required, _request,
+    _decode, _encode, _form_fields, _object, _required, _request,
     _schema_valid, _validate_schema
 """
+
+# Emitted into `datetime = :zoned` client and server modules, which route model
+# codecs through these. Keeping them module-local leaves the runtime contract
+# unchanged and keeps the stricter decoding away from already generated modules.
+const GENERATED_ZONED_CODECS = raw"""
+# RFC 3339 `date-time` needs `Z` or an offset. `date-time-local` is a wall clock
+# with no offset, which is the only meaning `Dates.DateTime` has here.
+function _decode_zoned(::Type{TimeZones.ZonedDateTime}, value::AbstractString, ::Bool)
+    occursin(r"(Z|[+-]\d{2}:\d{2})\z", value) || throw(
+        DecodeError("invalid RFC 3339 date-time $(repr(value)) (`Z` or an offset is required)"),
+    )
+    return _decode(TimeZones.ZonedDateTime, value)
+end
+function _decode_zoned(::Type{Dates.DateTime}, value::AbstractString, ::Bool)
+    occursin(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?\z", value) || throw(
+        DecodeError("invalid RFC 3339 date-time-local $(repr(value)) (`Z` and offsets are not allowed)"),
+    )
+    return _decode(Dates.DateTime, value)
+end
+_decode_zoned(::Type{Vector{T}}, value::AbstractVector, validate::Bool) where {T} =
+    T[_decode_zoned(T, item, validate) for item in value]
+function _decode_zoned(::Type{Dict{String,T}}, value::AbstractDict, validate::Bool) where {T}
+    output = Dict{String,T}()
+    for (key, item) in value
+        output[String(key)] = _decode_zoned(T, item, validate)
+    end
+    return output
+end
+function _decode_zoned(T::Union, value, validate::Bool)
+    variants = Base.uniontypes(T)
+    value === nothing && Nothing in variants && return nothing
+    candidates = filter(variant -> variant !== Absent && variant !== Nothing, variants)
+    length(candidates) == 1 || return _decode(T, value, validate)
+    return _decode_zoned(only(candidates), value, validate)
+end
+_decode_zoned(::Type{T}, value, validate::Bool) where {T} = _decode(T, value, validate)
+
+_encode_zoned(value::Dates.DateTime) = Dates.format(value, Dates.dateformat"yyyy-mm-ddTHH:MM:SS.sss")
+_encode_zoned(value::AbstractVector{UInt8}) = _encode(value)
+_encode_zoned(value::Union{AbstractVector,Tuple}) = Any[_encode_zoned(item) for item in value]
+function _encode_zoned(value::Union{AbstractDict,NamedTuple})
+    output = JSON.Object{String,Any}()
+    for (key, item) in pairs(value)
+        output[String(key)] = _encode_zoned(item)
+    end
+    return output
+end
+_encode_zoned(value) = _encode(value)
+"""
+
+_emit_datetime_codecs(io::IO, datetime::Symbol) = _emit_datetime_codecs(io, Val(datetime))
+_emit_datetime_codecs(::IO, ::Val) = nothing
+_emit_datetime_codecs(io::IO, ::Val{:zoned}) = print(io, GENERATED_ZONED_CODECS, '\n')
 
 # Emitted after the generated module's `_SPEC` constant. These forwarders keep
 # the public surface of a generated module (Client(), DEFAULT_CLIENT,
@@ -302,6 +355,7 @@ function _emit_model(
     abstract_targets,
     wrapped_aliases;
     encode::String = "_encode",
+    decode::String = "_decode",
 )
     doc = _model_docstring(model)
     doc === nothing || println(io, "@doc ", repr(doc))
@@ -332,7 +386,7 @@ function _emit_model(
         println(io, "_decode(::Type{", model.name, "}, value) = _decode(", model.name, ", value, true)")
         println(io, "function _decode(::Type{", model.name, "}, value, _openapi_validate::Bool)")
         println(io, "    _openapi_validate && _validate_schema(_SPEC, ", schema, ", value, ", repr("decoding " * model.name), "; direction = ", direction, ")")
-        println(io, "    return ", model.name, "(_decode(", type, ", value, _openapi_validate))")
+        println(io, "    return ", model.name, "(", decode, "(", type, ", value, _openapi_validate))")
         println(io, "end")
         println(io, "function _encode(value::", model.name, ")")
         println(io, "    output = ", encode, "(value.value)")
@@ -370,7 +424,7 @@ function _emit_model(
         println(io, "_decode(::Type{", model.name, "}, value) = _decode(", model.name, ", value, true)")
         println(io, "function _decode(::Type{", model.name, "}, value, _openapi_validate::Bool)")
         println(io, "    _openapi_validate && _validate_schema(_SPEC, ", schema, ", value, ", repr("decoding " * model.name), "; direction = ", direction, ")")
-        println(io, "    return ", model.name, "(_decode(", model.alias, ", value, _openapi_validate))")
+        println(io, "    return ", model.name, "(", decode, "(", model.alias, ", value, _openapi_validate))")
         println(io, "end")
         println(io, "function _encode(value::", model.name, ")")
         println(io, "    output = ", encode, "(value.value)")
@@ -453,7 +507,7 @@ function _emit_model(
                 descriptor = _schema_descriptor(node)
                 println(io, "    if !_openapi_validate || _schema_valid(_SPEC, ", descriptor, ", value; direction = ", direction, ")")
                 println(io, "        try")
-                println(io, "            push!(matches, _decode(", type, ", value, _openapi_validate))")
+                println(io, "            push!(matches, ", decode, "(", type, ", value, _openapi_validate))")
                 println(io, "        catch error")
                 println(io, "            error isa DecodeError || rethrow()")
                 println(io, "        end")
@@ -527,7 +581,7 @@ function _emit_model(
                 io,
                 "    ",
                 local_name,
-                " = _decode(",
+                " = ", decode, "(",
                 type,
                 ", _required(_openapi_object, ",
                 repr(field.wire_name),
@@ -542,7 +596,7 @@ function _emit_model(
                 local_name,
                 " = haskey(_openapi_object, ",
                 repr(field.wire_name),
-                ") ? _decode(",
+                ") ? ", decode, "(",
                 type,
                 ", _openapi_object[",
                 repr(field.wire_name),
@@ -560,7 +614,7 @@ function _emit_model(
         println(io, "    _openapi_additional_properties = Dict{String,", additional_type, "}()")
         println(io, "    for (_openapi_key, _openapi_item) in _openapi_object")
         println(io, "        String(_openapi_key) in ", _julia_literal(known), " && continue")
-        println(io, "        _openapi_additional_properties[String(_openapi_key)] = _decode(", additional_type, ", _openapi_item, _openapi_validate)")
+        println(io, "        _openapi_additional_properties[String(_openapi_key)] = ", decode, "(", additional_type, ", _openapi_item, _openapi_validate)")
         println(io, "    end")
     else
         println(io, "    _openapi_unknown = setdiff(String.(collect(keys(_openapi_object))), collect(", _julia_literal(known), "))")
@@ -1301,6 +1355,7 @@ function _generate(plan::ClientPlan)
     plan.datetime === :zoned && println(io, "using TimeZones")
     _emit_contract_guard(io)
     print(io, GENERATED_CLIENT_IMPORTS, '\n')
+    _emit_datetime_codecs(io, plan.datetime)
     _emit_security(io, plan)
     _emit_schema_data(io, plan)
     println(io, "const _SPEC = Runtime.Spec(;")
@@ -1331,6 +1386,7 @@ function _generate(plan::ClientPlan)
             abstract_targets,
             wrapped_aliases;
             encode = _datetime_encoder(plan.datetime),
+            decode = _datetime_decoder(plan.datetime),
         )
     end
     for operation in plan.operations
