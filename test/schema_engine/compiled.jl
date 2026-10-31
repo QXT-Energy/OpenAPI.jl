@@ -261,6 +261,8 @@ end
     @test !isvalid(ecma("^a.b\$"), "a\u2028b")
     @test isvalid(ecma("^a.b\$"), "a\U0001f600b")
     @test !isvalid(ecma("^a\\.b\$"), "axb")
+    @test isvalid(ecma("^[[:alpha:].]\$"), ".")
+    @test !isvalid(ecma("^[[:alpha:].]\$"), "-")
     @test !isvalid(ecma("^a[]\$"), "a")
     @test isvalid(ecma("^[^]\$"), "\n")
     @test isvalid(ecma("^\\p{digit}+\$"), "\u07c0\u0663")

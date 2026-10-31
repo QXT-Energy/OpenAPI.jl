@@ -401,6 +401,21 @@ function _ecma_class_start!(io::IO, pattern::AbstractString, i::Int)
     return i, true
 end
 
+# PCRE reads `[:name:]` in a class as a POSIX class. Copy it as one unit, so its `]` does
+# not end the class tracking. `i` is the index after the `[`.
+function _ecma_posix_class!(io::IO, pattern::AbstractString, i::Int)
+    if i > lastindex(pattern) || pattern[i] != ':'
+        return i
+    end
+    closing = findnext(":]", pattern, nextind(pattern, i))
+    bracket = findnext(']', pattern, i)
+    if closing === nothing || last(closing) != bracket
+        return i
+    end
+    write(io, SubString(pattern, i, bracket))
+    return nextind(pattern, bracket)
+end
+
 function _ecma_pattern(pattern::AbstractString)
     io = IOBuffer()
     in_class = false
@@ -414,6 +429,9 @@ function _ecma_pattern(pattern::AbstractString)
         elseif in_class
             in_class = char != ']'
             write(io, char)
+            if char == '['
+                i = _ecma_posix_class!(io, pattern, i)
+            end
         elseif char == '['
             i, in_class = _ecma_class_start!(io, pattern, i)
         elseif char == '.'
