@@ -288,17 +288,117 @@ function _ecma_property(property::AbstractString)
     return String(property)
 end
 
-# ECMA-262 `\s`: WhiteSpace (tab, vertical tab, form feed, every Zs, U+FEFF) and
-# LineTerminator (LF, CR, U+2028, U+2029). PCRE without UCP matches only the ASCII ones.
-# Julia compiles with ALT_BSUX, so code points use the JavaScript `\\uhhhh` form.
-const ECMA_WHITESPACE = "\\t\\n\\x0B\\f\\r\\p{Zs}\\u2028\\u2029\\uFEFF"
+# ECMA-262 `\s`: WhiteSpace (tab, vertical tab, form feed, U+FEFF, and the Unicode 16
+# Zs code points) and LineTerminator (LF, CR, U+2028, U+2029). PCRE without UCP knows
+# only the ASCII ones, and cannot remove a set inside a class, so `\s` and `\S` are
+# written as explicit ranges that work inside and outside a class.
+const ECMA_WHITESPACE_RANGES = (
+    0x09 => 0x0d,
+    0x20 => 0x20,
+    0xa0 => 0xa0,
+    0x1680 => 0x1680,
+    0x2000 => 0x200a,
+    0x2028 => 0x2029,
+    0x202f => 0x202f,
+    0x205f => 0x205f,
+    0x3000 => 0x3000,
+    0xfeff => 0xfeff,
+)
 
-function _ecma_whitespace(escaped::Char, in_class::Bool)
-    if in_class
-        # PCRE cannot subtract a set inside a class, so `[\S]` keeps its ASCII meaning.
-        return escaped == 's' ? ECMA_WHITESPACE : "\\S"
+function _ecma_complement(ranges)
+    output = Pair{UInt32,UInt32}[]
+    first_free = UInt32(0)
+    for (low, high) in ranges
+        low > first_free && push!(output, first_free => UInt32(low - 1))
+        first_free = UInt32(high + 1)
     end
-    return escaped == 's' ? "[$ECMA_WHITESPACE]" : "[^$ECMA_WHITESPACE]"
+    push!(output, first_free => UInt32(0x10ffff))
+    return output
+end
+
+# Julia compiles with ALT_BSUX, so BMP code points use the JavaScript `\uhhhh` form.
+# PCRE has no escape for an astral code point there, so it is written as a literal.
+function _ecma_code_point(code::Integer)
+    if code <= 0xff
+        return "\\x" * string(code; base = 16, pad = 2)
+    elseif code <= 0xffff
+        return "\\u" * string(code; base = 16, pad = 4)
+    end
+    return string(Char(code))
+end
+
+function _ecma_class_body(ranges)
+    io = IOBuffer()
+    for (low, high) in ranges
+        write(io, _ecma_code_point(low))
+        low == high || write(io, '-', _ecma_code_point(high))
+    end
+    return String(take!(io))
+end
+
+const ECMA_WHITESPACE = _ecma_class_body(ECMA_WHITESPACE_RANGES)
+const ECMA_NON_WHITESPACE = _ecma_class_body(_ecma_complement(ECMA_WHITESPACE_RANGES))
+# ECMA-262 `.` matches any code point except a LineTerminator.
+const ECMA_DOT = "[^\\n\\r\\u2028\\u2029]"
+
+function _ecma_write_set(io::IO, body::AbstractString, in_class::Bool)
+    if in_class
+        write(io, body)
+    else
+        write(io, '[', body, ']')
+    end
+    return
+end
+
+function _ecma_property_escape!(io::IO, pattern::AbstractString, i::Int)
+    property_type = pattern[i]
+    brace = nextind(pattern, i)
+    if brace > lastindex(pattern) || pattern[brace] != '{'
+        write(io, '\\', property_type)
+        return brace
+    end
+    closing = findnext('}', pattern, nextind(pattern, brace))
+    if closing === nothing
+        write(io, '\\', property_type)
+        return brace
+    end
+    property = SubString(pattern, nextind(pattern, brace), prevind(pattern, closing))
+    write(io, '\\', property_type, '{', _ecma_property(property), '}')
+    return nextind(pattern, closing)
+end
+
+# `i` is the index of the escaped character. The pair is consumed here, so an escaped
+# `[`, `]`, or `.` never reaches the class tracking in `_ecma_pattern`.
+function _ecma_escape!(io::IO, pattern::AbstractString, i::Int, in_class::Bool)
+    escaped = pattern[i]
+    if escaped == 's'
+        _ecma_write_set(io, ECMA_WHITESPACE, in_class)
+    elseif escaped == 'S'
+        _ecma_write_set(io, ECMA_NON_WHITESPACE, in_class)
+    elseif escaped == 'p' || escaped == 'P'
+        return _ecma_property_escape!(io, pattern, i)
+    else
+        write(io, '\\', escaped)
+    end
+    return nextind(pattern, i)
+end
+
+# ECMA-262 reads a `]` right after `[` or `[^` as the end of the class: `[]` matches
+# nothing and `[^]` matches any code point. PCRE reads that `]` as a literal.
+function _ecma_class_start!(io::IO, pattern::AbstractString, i::Int)
+    stop = lastindex(pattern)
+    after = i
+    empty_class = "(?!)"
+    if i <= stop && pattern[i] == '^'
+        after = nextind(pattern, i)
+        empty_class = "(?s:.)"
+    end
+    if after <= stop && pattern[after] == ']'
+        write(io, empty_class)
+        return nextind(pattern, after), false
+    end
+    write(io, '[')
+    return i, true
 end
 
 function _ecma_pattern(pattern::AbstractString)
@@ -307,45 +407,20 @@ function _ecma_pattern(pattern::AbstractString)
     i = firstindex(pattern)
     stop = lastindex(pattern)
     while i <= stop
-        if pattern[i] != '\\'
-            pattern[i] == '[' && (in_class = true)
-            pattern[i] == ']' && (in_class = false)
-            write(io, pattern[i])
-            i = nextind(pattern, i)
-            continue
+        char = pattern[i]
+        i = nextind(pattern, i)
+        if char == '\\' && i <= stop
+            i = _ecma_escape!(io, pattern, i, in_class)
+        elseif in_class
+            in_class = char != ']'
+            write(io, char)
+        elseif char == '['
+            i, in_class = _ecma_class_start!(io, pattern, i)
+        elseif char == '.'
+            write(io, ECMA_DOT)
+        else
+            write(io, char)
         end
-        slashes = 0
-        while i <= stop && pattern[i] == '\\'
-            slashes += 1
-            i = nextind(pattern, i)
-        end
-        for _ in 1:slashes
-            write(io, '\\')
-        end
-        isodd(slashes) || continue
-        i <= stop || continue
-        if pattern[i] in ('s', 'S')
-            seek(io, position(io) - 1)
-            truncate(io, position(io))
-            write(io, _ecma_whitespace(pattern[i], in_class))
-            i = nextind(pattern, i)
-            continue
-        end
-        pattern[i] in ('p', 'P') || continue
-        property_type = pattern[i]
-        brace = nextind(pattern, i)
-        brace <= stop && pattern[brace] == '{' || continue
-        closing = findnext('}', pattern, nextind(pattern, brace))
-        closing === nothing && continue
-        property = SubString(
-            pattern,
-            nextind(pattern, brace),
-            prevind(pattern, closing),
-        )
-        seek(io, position(io) - 1)
-        truncate(io, position(io))
-        write(io, '\\', property_type, '{', _ecma_property(property), '}')
-        i = nextind(pattern, closing)
     end
     return String(take!(io))
 end
@@ -355,5 +430,6 @@ end
 # matches Unicode properties, which needs only UTF mode.
 const ECMA_COMPILE_OPTIONS = (Base.DEFAULT_COMPILER_OPTS & ~Base.PCRE.UCP) | Base.PCRE.DOLLAR_ENDONLY
 
-_ecma_regex(pattern::AbstractString) =
-    Regex(_ecma_pattern(pattern), ECMA_COMPILE_OPTIONS, Base.DEFAULT_MATCH_OPTS)
+function _ecma_regex(pattern::AbstractString)
+    return Regex(_ecma_pattern(pattern), ECMA_COMPILE_OPTIONS, Base.DEFAULT_MATCH_OPTS)
+end
