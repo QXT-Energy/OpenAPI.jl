@@ -13,6 +13,15 @@ import OpenAPI.Runtime:
     _schema_valid, _validate_schema
 """
 
+# The `models_only = true` form of the imports above. It leaves out the names
+# that only operations and credentials use.
+const GENERATED_MODELS_IMPORTS = raw"""
+const SchemaEngine = OpenAPI.SchemaEngine
+import OpenAPI.Runtime:
+    ABSENT, Absent, DecodeError, SchemaValidationError, _decode, _encode,
+    _form_fields, _object, _required, _schema_valid, _validate_schema
+"""
+
 # Emitted into `datetime = :zoned` client and server modules, which route model
 # codecs through these. Keeping them module-local leaves the runtime contract
 # unchanged and keeps the stricter decoding away from already generated modules.
@@ -794,9 +803,13 @@ function _directional_required_rules(plan::GenerationPlan, template)
     return output
 end
 
-function _client_schema_handles(plan::GenerationPlan)
+function _client_schema_handles(plan::GenerationPlan; models_only::Bool = false)
     handles = SchemaHandle[last(pair) for pair in plan.api.schemas]
-    for operation in plan.api.operations
+    operations = plan.api.operations
+    if models_only
+        operations = empty(operations)
+    end
+    for operation in operations
         operation.direction === :request || continue
         for parameter in operation.parameters
             parameter.schema === nothing || push!(handles, parameter.schema)
@@ -830,8 +843,38 @@ function _client_schema_handles(plan::GenerationPlan)
     return handles
 end
 
-function _emit_schema_data(io::IO, plan::GenerationPlan)
-    handles = _client_schema_handles(plan)
+# Name of the file that holds one schema resource. `origin` is the retrieval
+# URI the resource had before the portable-id rewrite. A file origin gives its
+# basename. Another origin gives its last path segment when that ends in
+# `.json`. Otherwise the name comes from the portable id.
+function _schema_file_name(id::AbstractString, origin::Union{Nothing,AbstractString})
+    if origin !== nothing
+        uri = Resources.URIs.URI(origin)
+        segment = Resources.URIs.unescapeuri(last(split(uri.path, '/')))
+        if lowercase(uri.scheme) == "file" && !isempty(splitext(segment)[1])
+            return splitext(segment)[1] * ".json"
+        end
+        if endswith(segment, ".json") && !isempty(segment)
+            return segment
+        end
+    end
+    path = first(split(first(split(id, '#')), '?'))
+    segment = last(split(path, '/'))
+    stem = replace(chopsuffix(segment, ".json"), r"[^A-Za-z0-9._-]" => "_")
+    isempty(stem) && (stem = "schema")
+    return stem * ".json"
+end
+
+# `schema_dir` is not `nothing` when the resource documents go to files. The
+# generated module then reads each file while it precompiles, so the data is in
+# the package image and no file is read at run time.
+function _emit_schema_data(
+    io::IO,
+    plan::GenerationPlan;
+    models_only::Bool = false,
+    schema_dir::Union{Nothing,AbstractString} = nothing,
+)
+    handles = _client_schema_handles(plan; models_only)
     graph = isempty(handles) ? nothing : first(handles).workspace.compiled
     if graph === nothing
         println(io, "const _SCHEMA_RESOURCE_DATA = Any[]")
@@ -852,8 +895,35 @@ function _emit_schema_data(io::IO, plan::GenerationPlan)
     # thousands of schema roots and directional rules, which makes top-level
     # type hashing and subtyping take minutes. An Any vector keeps stable values
     # without creating a giant tuple type.
+    if schema_dir !== nothing
+        rm(schema_dir; recursive = true, force = true)
+        mkpath(schema_dir)
+        println(io, "function _schema_resource(name::String)")
+        println(io, "    path = joinpath(@__DIR__, \"schemas\", name)")
+        println(io, "    include_dependency(path)")
+        println(io, "    return read(path, String)")
+        println(io, "end\n")
+    end
+    taken = Dict{String,String}()
+    origins = first(handles).workspace.origins
     println(io, "const _SCHEMA_RESOURCE_DATA = Any[")
     for resource in resources
+        json = repr(JSON.json(resource.contents))
+        if schema_dir !== nothing
+            id = string(resource.id)
+            name = _schema_file_name(id, get(origins, id, nothing))
+            source = get(origins, id, id)
+            if haskey(taken, name)
+                throw(
+                    ArgumentError(
+                        "schema resources `$(taken[name])` and `$source` both map to the file name `$name`",
+                    ),
+                )
+            end
+            taken[name] = source
+            write(joinpath(schema_dir, name), JSON.json(resource.contents))
+            json = "_schema_resource(" * repr(name) * ")"
+        end
         println(
             io,
             "    (id = ",
@@ -863,7 +933,7 @@ function _emit_schema_data(io::IO, plan::GenerationPlan)
             ", media_type = ",
             _julia_literal(resource.media_type),
             ", json = ",
-            repr(JSON.json(resource.contents)),
+            json,
             "),",
         )
     end
@@ -1350,7 +1420,11 @@ function _emit_contract_guard(io::IO)
     )
 end
 
-function _generate(plan::ClientPlan)
+function _generate(
+    plan::ClientPlan;
+    models_only::Bool = false,
+    schema_dir::Union{Nothing,AbstractString} = nothing,
+)
     io = IOBuffer()
     println(
         io,
@@ -1363,22 +1437,38 @@ function _generate(plan::ClientPlan)
         ". Do not edit.",
     )
     println(io, "module ", plan.module_name, "\n")
-    println(io, "using HTTP, JSON, OpenAPI, Base64, Dates, UUIDs")
+    if models_only
+        println(io, "using JSON, OpenAPI, Base64, Dates, UUIDs")
+    else
+        println(io, "using HTTP, JSON, OpenAPI, Base64, Dates, UUIDs")
+    end
     plan.datetime === :zoned && println(io, "using TimeZones")
     _emit_contract_guard(io)
-    print(io, GENERATED_CLIENT_IMPORTS, '\n')
+    if models_only
+        print(io, GENERATED_MODELS_IMPORTS, '\n')
+    else
+        print(io, GENERATED_CLIENT_IMPORTS, '\n')
+    end
     _emit_datetime_codecs(io, plan.datetime)
-    _emit_security(io, plan)
-    _emit_schema_data(io, plan)
+    if models_only
+        println(io, "const _SECURITY_SCHEMES = Dict{String,NamedTuple}()\n")
+    else
+        _emit_security(io, plan)
+    end
+    _emit_schema_data(io, plan; models_only, schema_dir)
     println(io, "const _SPEC = Runtime.Spec(;")
     println(io, "    security_schemes = _SECURITY_SCHEMES,")
     println(io, "    resources = _SCHEMA_RESOURCE_DATA,")
     println(io, "    roots = _SCHEMA_ROOT_DATA,")
     println(io, "    dialects = _SCHEMA_DIALECT_DATA,")
     println(io, "    directional_required = _SCHEMA_DIRECTIONAL_REQUIRED,")
-    println(io, "    default_server = ", repr(_default_server(plan.api)), ",")
+    if models_only
+        println(io, "    default_server = \"\",")
+    else
+        println(io, "    default_server = ", repr(_default_server(plan.api)), ",")
+    end
     println(io, ")\n")
-    print(io, GENERATED_CLIENT_GLUE, '\n')
+    models_only || print(io, GENERATED_CLIENT_GLUE, '\n')
 
     indices = _model_indices(plan)
     wrapped_aliases = _cyclic_aliases(plan)
@@ -1401,9 +1491,11 @@ function _generate(plan::ClientPlan)
             decode = _datetime_decoder(plan.datetime),
         )
     end
-    for operation in plan.operations
-        const_name = _emit_operation_descriptor(io, operation, plan.api)
-        _emit_operation(io, operation, const_name)
+    if !models_only
+        for operation in plan.operations
+            const_name = _emit_operation_descriptor(io, operation, plan.api)
+            _emit_operation(io, operation, const_name)
+        end
     end
     println(io, "end # module ", plan.module_name)
     return String(take!(io))
@@ -1423,16 +1515,33 @@ maps to `TimeZones.ZonedDateTime`, requires an offset, and preserves it, making
 the generated module depend on TimeZones.jl. Under `:zoned`, `format:
 date-time-local` maps to `Dates.DateTime`, a wall clock written with no offset;
 under `:utc` it stays a `String`.
+
+`models_only = true` generates the model types, `_decode`, `_encode`, and the
+schema data that validation needs. It leaves out `using HTTP`, the client
+surface (`Client`, `DEFAULT_CLIENT`, `SERVER`, `credential!`, `server!`, and
+related functions), and all API operation functions. The generated module
+then loads without HTTP.jl. It also writes each embedded schema document to a
+file in the `schemas` directory next to `path`, and the module reads these
+files at precompile time. The generator owns that directory and replaces its
+contents on each run. This option requires `path`.
 """
 function client(
     source;
     name::AbstractString = "ApiClient",
     path::Union{Nothing,AbstractString} = nothing,
     strict::Bool = true,
+    models_only::Bool = false,
     kwargs...,
 )
+    if models_only && path === nothing
+        throw(ArgumentError("models_only = true requires a `path`, which names the generated module file"))
+    end
     client_plan = source isa ClientPlan ? source : plan(source; name, strict, kwargs...)
-    output = _generate(client_plan)
+    schema_dir = nothing
+    if models_only
+        schema_dir = joinpath(dirname(path), "schemas")
+    end
+    output = _generate(client_plan; models_only, schema_dir)
     if path !== nothing
         open(path, "w") do io
             write(io, output)

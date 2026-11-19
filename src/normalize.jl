@@ -8,6 +8,10 @@ Provenance(node::Resources.NodeId) = Provenance(node, (node,))
 
 mutable struct SchemaWorkspace
     compiled::Any
+    # Portable resource id to the retrieval URI the resource had before the
+    # portable-id rewrite.
+    origins::Dict{String,String}
+    SchemaWorkspace(compiled) = new(compiled, Dict{String,String}())
 end
 
 struct SchemaHandle
@@ -733,7 +737,13 @@ function _compile_schemas!(context::NormalizationContext)
         return
     end
     context.schema_workspace.compiled = try
-        SchemaEngine.rebase(compiled, _portable_schema_ids(context, compiled))
+        portable = _portable_schema_ids(context, compiled)
+        for resource in values(getfield(getfield(compiled, :template).registry, :resources))
+            isempty(resource.source.pointer) || continue
+            context.schema_workspace.origins[string(portable[resource.id])] =
+                string(resource.retrieval)
+        end
+        SchemaEngine.rebase(compiled, portable)
     catch error
         location = error isa SchemaEngine.CompilationError ? error.location : first(roots)
         _reference_error!(

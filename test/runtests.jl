@@ -275,6 +275,7 @@ end
 include("normalization.jl")
 include("models.jl")
 include("generated_contract.jl")
+include("models_only.jl")
 include("discriminators.jl")
 include("references.jl")
 include("semantics.jl")
